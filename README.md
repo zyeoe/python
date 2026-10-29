@@ -1,4 +1,4 @@
-﻿# Desktop Agent
+# Desktop Agent
 
 基于大模型的桌面端智能体项目骨架。应用使用 Python 后端与 HTML/JS 前端，通过 PyInstaller 打包为桌面应用。
 
