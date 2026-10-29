@@ -2,7 +2,7 @@
 
 基于大模型的桌面端智能体项目骨架。应用使用 Python 后端与 HTML/JS 前端，通过 PyInstaller 打包为桌面应用。
 
-> 当前状态：仅包含目录结构与基础配置，尚未实现业务代码。
+> 当前状态：已实现四种基础工具与可运行的 ReAct 终端循环；桌面 UI、FastAPI/WebSocket 尚未接入。
 
 ## 架构说明
 
@@ -58,6 +58,32 @@ pip install -r requirements.txt
 - `mcp.json`：MCP Server 列表
 - `packaging/desktop-agent.spec`：PyInstaller 打包配置
 
+## 终端对话测试
+
+启动前先在 `.env` 中配置模型：
+
+```dotenv
+OPENAI_API_KEY=your-key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=your-model-name
+```
+
+在项目根目录运行：
+
+```bash
+python -m agent.core --workspace .
+```
+
+进入后可直接在 `You >` 提示符输入问题。输入 `/exit` 或 `/quit` 退出。默认每个用户请求最多执行 6 个模型轮次，可用 `--max-steps` 修改。
+
+当前工具：
+
+- `read(path, offset, limit)`：分页、带行号读取文本
+- `write(path, content)`：自动创建目录并原子写入
+- `edit(path, old, new)`：只允许精确且唯一的字符串替换
+- `bash(command, timeout)`：带硬超时执行命令
+
+JSON Schema 位于 `agent/tools.py` 的 `TOOL_SCHEMAS`，OpenAI tools 包装位于 `OPENAI_TOOLS`。
 ## 打包
 
 ```bash
@@ -68,6 +94,6 @@ pyinstaller packaging/desktop-agent.spec
 
 - [ ] 实现 pywebview 桌面入口
 - [ ] 实现 FastAPI 与 WebSocket 服务
-- [ ] 实现 Agent 主循环
+- [x] 实现 Agent 主循环
 - [ ] 实现工具注册与权限确认
 - [ ] 接入 MCP Client
