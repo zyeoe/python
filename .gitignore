@@ -1,3 +1,10 @@
 ﻿.env
 __pycache__/
 *.py[cod]
+.venv/
+data/*
+!data/.gitkeep
+build/
+dist/
+*.log
+.DS_Store

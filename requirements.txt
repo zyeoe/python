@@ -1,0 +1,22 @@
+﻿# Desktop shell
+pywebview
+
+# Backend
+fastapi
+uvicorn[standard]
+websockets
+
+# LLM and HTTP
+openai
+httpx
+
+# Config
+pydantic
+pydantic-settings
+python-dotenv
+
+# MCP
+mcp
+
+# Packaging
+pyinstaller
