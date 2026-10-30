@@ -84,6 +84,63 @@ python -m agent.core --workspace .
 - `bash(command, timeout)`：带硬超时执行命令
 
 JSON Schema 位于 `agent/tools.py` 的 `TOOL_SCHEMAS`，OpenAI tools 包装位于 `OPENAI_TOOLS`。
+## 后端服务
+
+从项目根目录启动：
+
+```bash
+uvicorn server.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+也可以使用：
+
+```bash
+python -m uvicorn server.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+### WebSocket 事件流
+
+连接地址：
+
+```text
+ws://127.0.0.1:8000/ws/{session_id}
+```
+
+发送用户文本：
+
+```json
+{"type": "user_message", "content": "读取 README.md 并总结"}
+```
+
+服务端推送的主要事件：
+
+- `thinking`：高层执行进度，不包含模型隐藏思维链
+- `tool_call`：工具名称与参数，例如正在读取哪个文件
+- `tool_result`：工具返回内容，命令输出位于 `result.stdout` / `result.stderr`
+- `final`：最终回答
+- `error`：服务端错误，包含 `level: "error"`，前端应标红显示
+- `interrupted`：Agent 已被中断
+
+### 中断 Agent
+
+通过 WebSocket 发送：
+
+```json
+{"type": "interrupt"}
+```
+
+或调用 HTTP 接口：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/sessions/{session_id}/interrupt
+```
+
 ## 打包
 
 ```bash
@@ -93,7 +150,7 @@ pyinstaller packaging/desktop-agent.spec
 ## 后续开发
 
 - [ ] 实现 pywebview 桌面入口
-- [ ] 实现 FastAPI 与 WebSocket 服务
+- [x] 实现 FastAPI 与 WebSocket 服务
 - [x] 实现 Agent 主循环
 - [ ] 实现工具注册与权限确认
 - [ ] 接入 MCP Client

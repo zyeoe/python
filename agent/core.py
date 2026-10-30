@@ -20,8 +20,10 @@ import argparse
 import json
 import os
 import sys
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Support both:
 #   python -m agent.core
@@ -59,6 +61,60 @@ actions taken and the final result.
 
 DEFAULT_MODEL = "gpt-4.1-mini"
 MAX_TOOL_MESSAGE_CHARS = 60_000
+
+
+class AgentInterrupted(RuntimeError):
+    """Raised when a client requests cancellation at a safe loop boundary."""
+
+
+def _check_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise AgentInterrupted("Agent run interrupted by client")
+
+
+def _emit_event(
+    on_event: Callable[[dict[str, Any]], None] | None,
+    event_type: str,
+    message: str | None = None,
+    **payload: Any,
+) -> None:
+    """Send one high-level progress event to the caller.
+
+    This is intentionally a progress/observability stream, not a disclosure of
+    the model's hidden chain-of-thought. Consumers receive status, tool actions,
+    tool results and the final answer.
+    """
+
+    if on_event is None:
+        return
+
+    event: dict[str, Any] = {
+        "type": event_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
+    if message is not None:
+        event["message"] = message
+
+    try:
+        on_event(event)
+    except Exception as exc:
+        # Observability must not break the agent loop. A disconnected websocket,
+        # for example, should be handled by the server rather than corrupting
+        # the conversation state.
+        print(f"[event callback error] {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def _describe_tool_call(name: str, arguments: dict[str, Any]) -> str:
+    if name == "read":
+        return f"读取文件：{arguments.get('path', '?')}"
+    if name == "write":
+        return f"写入文件：{arguments.get('path', '?')}"
+    if name == "edit":
+        return f"编辑文件：{arguments.get('path', '?')}"
+    if name == "bash":
+        return f"执行命令：{arguments.get('command', '?')}"
+    return f"调用工具：{name}"
 
 
 def _load_dotenv_if_available() -> None:
@@ -211,15 +267,37 @@ class ReActAgent:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.trace = []
 
-    def run(self, user_input: str) -> str:
-        """Run one user request through the ReAct loop."""
+    def run(
+        self,
+        user_input: str,
+        *,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        """Run one user request through the ReAct loop.
+
+        Args:
+            user_input: The user's new message.
+            on_event: Optional callback receiving high-level event dictionaries.
+            cancel_event: Optional threading.Event checked at model/tool
+                boundaries. Setting it stops the run with AgentInterrupted.
+        """
 
         if not isinstance(user_input, str) or not user_input.strip():
             raise ValueError("user_input must be a non-empty string")
 
         self.messages.append({"role": "user", "content": user_input})
+        _emit_event(on_event, "thinking", "正在分析请求并规划下一步。", step=0)
 
         for step in range(1, self.max_steps + 1):
+            _check_cancelled(cancel_event)
+            _emit_event(
+                on_event,
+                "thinking",
+                f"第 {step}/{self.max_steps} 轮：正在等待模型决定下一步。",
+                step=step,
+            )
+
             # On the final turn, omit tools. This keeps the hard turn limit while
             # giving the model a chance to summarize the evidence it already has.
             request: dict[str, Any] = {
@@ -231,6 +309,7 @@ class ReActAgent:
                 request["tool_choice"] = "auto"
 
             response = self.client.chat.completions.create(**request)
+            _check_cancelled(cancel_event)
             message = response.choices[0].message
             content = _message_text(getattr(message, "content", None))
             raw_tool_calls = getattr(message, "tool_calls", None) or []
@@ -247,17 +326,34 @@ class ReActAgent:
             self.messages.append(assistant_message)
 
             if not tool_calls:
-                return content or "The model returned an empty response."
+                answer = content or "The model returned an empty response."
+                _emit_event(
+                    on_event,
+                    "final",
+                    "Agent 已生成最终回答。",
+                    content=answer,
+                    step=step,
+                )
+                return answer
 
             # A provider should not emit tool calls when tools were omitted on
             # the final turn. Fail clearly rather than making an extra request.
             if step == self.max_steps:
-                return content or (
+                answer = content or (
                     f"Stopped after reaching max_steps={self.max_steps}. "
                     "The model did not produce a final answer."
                 )
+                _emit_event(
+                    on_event,
+                    "final",
+                    "Agent 已达到最大轮次并返回当前结果。",
+                    content=answer,
+                    step=step,
+                )
+                return answer
 
             for call in tool_calls:
+                _check_cancelled(cancel_event)
                 call_id = str(call.get("id", ""))
                 function = call.get("function", {}) or {}
                 name = str(function.get("name", ""))
@@ -280,6 +376,14 @@ class ReActAgent:
                         "error": f"Invalid tool arguments: {exc}",
                     }
                 else:
+                    _emit_event(
+                        on_event,
+                        "tool_call",
+                        _describe_tool_call(name, arguments),
+                        step=step,
+                        tool=name,
+                        arguments=arguments,
+                    )
                     function_impl = TOOL_FUNCTIONS.get(name)
                     if function_impl is None:
                         tool_result = {"error": f"Unknown tool: {name}"}
@@ -300,6 +404,19 @@ class ReActAgent:
                     }
                 )
 
+                is_error = isinstance(tool_result, dict) and "error" in tool_result
+                _emit_event(
+                    on_event,
+                    "tool_result",
+                    f"工具 {name} 执行完成。",
+                    step=step,
+                    tool=name,
+                    arguments=arguments,
+                    result=tool_result,
+                    is_error=is_error,
+                )
+                _check_cancelled(cancel_event)
+
                 tool_content = _clip_tool_message(result_to_text(tool_result))
                 self.messages.append(
                     {
@@ -316,10 +433,18 @@ class ReActAgent:
 
         # Defensive fallback. The final iteration normally returns above because
         # tools are omitted on the last turn.
-        return (
+        answer = (
             f"Stopped after reaching max_steps={self.max_steps}. "
             "No final answer was produced."
         )
+        _emit_event(
+            on_event,
+            "final",
+            "Agent 已停止并返回当前状态。",
+            content=answer,
+            step=self.max_steps,
+        )
+        return answer
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
