@@ -7,10 +7,122 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main class="app-shell">
-    <h1>Desktop Agent</h1>
-    <p id="status">桌面应用骨架已就绪。</p>
-  </main>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">A</span>
+        <span class="brand-name">Desktop Agent</span>
+      </div>
+      <div class="workspace-pill" title="当前工作区">
+        <span class="workspace-icon">◇</span>
+        <span id="workspaceName">正在读取工作区...</span>
+      </div>
+      <div class="topbar-spacer"></div>
+      <div id="connectionStatus" class="connection-status is-connecting">
+        <span class="status-dot"></span>
+        <span id="connectionText">连接中</span>
+      </div>
+    </header>
+
+    <main class="workspace-layout">
+      <aside class="explorer-panel panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-kicker">WORKSPACE</span>
+            <h2>资源管理器</h2>
+          </div>
+          <button id="refreshTreeBtn" class="icon-button" title="刷新文件树" aria-label="刷新文件树">↻</button>
+        </div>
+        <div id="fileTree" class="file-tree">
+          <div class="panel-empty">正在加载文件...</div>
+        </div>
+      </aside>
+
+      <section class="editor-panel">
+        <div class="editor-tabbar">
+          <div id="fileTabs" class="file-tabs">
+            <div class="empty-tab">未打开文件</div>
+          </div>
+          <div class="editor-actions">
+            <button id="refreshFileBtn" class="icon-button" title="重新读取当前文件" aria-label="重新读取当前文件" disabled>↻</button>
+            <button id="copyFileBtn" class="icon-button" title="复制文件内容" aria-label="复制文件内容" disabled>⧉</button>
+          </div>
+        </div>
+
+        <div id="editorEmpty" class="editor-empty">
+          <div class="empty-illustration">&lt;/&gt;</div>
+          <h2>选择一个文件开始阅读</h2>
+          <p>左侧资源管理器会显示当前工作区。Agent 修改文件后，这里会自动刷新。</p>
+        </div>
+
+        <div id="codeScroll" class="code-scroll" hidden>
+          <div id="codeView" class="code-view">
+            <pre id="lineNumbers" class="line-numbers" aria-hidden="true"></pre>
+            <pre id="codeContent" class="code-content"></pre>
+          </div>
+        </div>
+
+        <footer class="editor-statusbar">
+          <span id="fileLanguage">—</span>
+          <span id="fileSize">—</span>
+          <span id="filePathStatus">未打开文件</span>
+        </footer>
+      </section>
+
+      <aside class="agent-panel">
+        <section class="chat-section">
+          <div class="panel-header chat-header">
+            <div>
+              <span class="panel-kicker">REACT AGENT</span>
+              <h2>对话</h2>
+            </div>
+            <button id="interruptBtn" class="interrupt-button" disabled>■ 中断</button>
+          </div>
+
+          <div id="chatMessages" class="chat-messages" aria-live="polite">
+            <article class="message assistant">
+              <div class="message-meta"><span>Agent</span><span>就绪</span></div>
+              <div class="message-body">
+                我可以读取文件、执行命令并修改当前工作区。输入任务后，执行过程和工具结果会显示在下方工具面板。
+              </div>
+            </article>
+          </div>
+
+          <form id="chatForm" class="composer">
+            <textarea id="chatInput" rows="3" placeholder="描述你想让 Agent 完成的任务… (Enter 发送，Shift+Enter 换行)" spellcheck="false"></textarea>
+            <div class="composer-footer">
+              <span id="composerHint" class="composer-hint">连接建立后可发送</span>
+              <button id="sendBtn" class="send-button" type="submit" disabled>发送 <span>↗</span></button>
+            </div>
+          </form>
+        </section>
+
+        <section class="tool-section">
+          <div class="panel-header tool-header">
+            <div class="tool-title-wrap">
+              <span class="tool-indicator"></span>
+              <div>
+                <span class="panel-kicker">LIVE EVENT STREAM</span>
+                <h2>工具调用面板</h2>
+              </div>
+              <span id="toolCount" class="count-badge">0</span>
+            </div>
+            <button id="clearToolsBtn" class="text-button" title="清空工具日志">清空</button>
+          </div>
+
+          <div id="toolTimeline" class="tool-timeline" aria-live="polite">
+            <div id="toolEmpty" class="tool-empty">
+              <div class="tool-empty-icon">⌁</div>
+              <p>还没有工具调用</p>
+              <span>读取文件、命令输出、文件 diff 和错误都会显示在这里。</span>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
   <script src="app.js"></script>
 </body>
 </html>

@@ -84,6 +84,27 @@ python -m agent.core --workspace .
 - `bash(command, timeout)`：带硬超时执行命令
 
 JSON Schema 位于 `agent/tools.py` 的 `TOOL_SCHEMAS`，OpenAI tools 包装位于 `OPENAI_TOOLS`。
+## 前端界面
+
+`ui/` 使用原生 HTML/CSS/JS 实现三栏桌面界面：
+
+- 左侧资源管理器：读取 `/api/workspace/tree`
+- 中间代码阅读区：读取 `/api/workspace/file`，带行号和轻量语法高亮
+- 右侧对话与工具调用面板：通过 WebSocket 实时渲染 `thinking`、`tool_call`、`tool_result`、`final`、`error`、`interrupted`
+
+默认连接 `http://127.0.0.1:8000`。pywebview 启动时可以注入：
+
+```js
+window.AGENT_API_BASE = "http://127.0.0.1:8000";
+```
+
+也可以使用查询参数：
+
+```text
+ui/index.html?apiBase=http://127.0.0.1:8000&file=agent/core.py
+```
+
+工具结果中的命令输出、文件 diff 和错误会显示在右侧工具调用面板；错误使用红色样式。
 ## 后端服务
 
 从项目根目录启动：

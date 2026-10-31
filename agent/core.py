@@ -17,6 +17,7 @@ from __future__ import annotations
 # =============================================================================
 
 import argparse
+import difflib
 import json
 import os
 import sys
@@ -115,6 +116,55 @@ def _describe_tool_call(name: str, arguments: dict[str, Any]) -> str:
     if name == "bash":
         return f"执行命令：{arguments.get('command', '?')}"
     return f"调用工具：{name}"
+
+
+def _snapshot_file_for_diff(
+    name: str,
+    arguments: dict[str, Any],
+) -> tuple[Path, str] | None:
+    """Capture a file before write/edit so the UI can receive a unified diff."""
+
+    if name not in {"write", "edit"}:
+        return None
+    raw_path = arguments.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve(strict=False)
+    try:
+        before = path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, IsADirectoryError, OSError):
+        before = ""
+    return path, before
+
+
+def _build_file_diff(snapshot: tuple[Path, str] | None) -> str | None:
+    """Build a bounded unified diff for a write/edit tool result."""
+
+    if snapshot is None:
+        return None
+    path, before = snapshot
+    try:
+        after = path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, IsADirectoryError, OSError):
+        after = ""
+    if before == after:
+        return None
+
+    diff = "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{path.name}",
+            tofile=f"b/{path.name}",
+            lineterm="",
+        )
+    )
+    if len(diff) > 20_000:
+        diff = diff[:20_000] + "\n... [diff truncated]"
+    return diff
 
 
 def _load_dotenv_if_available() -> None:
@@ -366,6 +416,7 @@ class ReActAgent:
                     )
 
                 arguments: dict[str, Any] = {}
+                snapshot = None
                 try:
                     parsed_arguments = json.loads(raw_arguments or "{}")
                     if not isinstance(parsed_arguments, dict):
@@ -381,6 +432,7 @@ class ReActAgent:
                         "tool_call",
                         _describe_tool_call(name, arguments),
                         step=step,
+                        call_id=call_id,
                         tool=name,
                         arguments=arguments,
                     )
@@ -388,6 +440,7 @@ class ReActAgent:
                     if function_impl is None:
                         tool_result = {"error": f"Unknown tool: {name}"}
                     else:
+                        snapshot = _snapshot_file_for_diff(name, arguments)
                         try:
                             tool_result = function_impl(**arguments)
                         except Exception as exc:  # Tool errors are model-visible.
@@ -398,22 +451,27 @@ class ReActAgent:
                 self.trace.append(
                     {
                         "step": step,
+                        "call_id": call_id,
                         "tool": name,
                         "arguments": arguments,
                         "result": tool_result,
+                        "diff": diff_text if "diff_text" in locals() else None,
                     }
                 )
 
                 is_error = isinstance(tool_result, dict) and "error" in tool_result
+                diff_text = _build_file_diff(snapshot)
                 _emit_event(
                     on_event,
                     "tool_result",
                     f"工具 {name} 执行完成。",
                     step=step,
+                    call_id=call_id,
                     tool=name,
                     arguments=arguments,
                     result=tool_result,
                     is_error=is_error,
+                    diff=diff_text,
                 )
                 _check_cancelled(cancel_event)
 

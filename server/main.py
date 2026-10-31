@@ -105,6 +105,113 @@ class SessionState:
 ACTIVE_SESSIONS: dict[str, SessionState] = {}
 
 
+WORKSPACE_ROOT = Path(os.getenv("AGENT_WORKSPACE", ".")).expanduser().resolve()
+MAX_TREE_ENTRIES = 2_000
+MAX_TREE_DEPTH = 12
+MAX_FILE_BYTES = 2_000_000
+EXCLUDED_DIRS = {
+    ".git",
+    ".idea",
+    ".venv",
+    ".vscode",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+}
+EXCLUDED_FILES = {".env"}
+
+
+def _workspace_path(relative_path: str) -> Path:
+    """Resolve a UI path and prevent escaping the configured workspace root."""
+
+    if not isinstance(relative_path, str):
+        raise HTTPException(status_code=400, detail="path must be a string")
+    candidate = (WORKSPACE_ROOT / relative_path).resolve(strict=False)
+    try:
+        candidate.relative_to(WORKSPACE_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="path is outside the workspace") from exc
+    return candidate
+
+
+def _relative_display_path(path: Path) -> str:
+    return path.relative_to(WORKSPACE_ROOT).as_posix()
+
+
+def _language_for_path(path: Path) -> str:
+    return {
+        ".py": "python",
+        ".js": "javascript",
+        ".mjs": "javascript",
+        ".cjs": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".jsx": "javascript",
+        ".html": "html",
+        ".htm": "html",
+        ".css": "css",
+        ".scss": "css",
+        ".json": "json",
+        ".md": "markdown",
+        ".txt": "text",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".toml": "toml",
+        ".xml": "xml",
+        ".sh": "bash",
+        ".ps1": "powershell",
+    }.get(path.suffix.lower(), "text")
+
+
+def _build_tree(directory: Path, depth: int, counter: list[int]) -> list[dict[str, Any]]:
+    """Build a bounded, sorted workspace tree for the explorer panel."""
+
+    if depth > MAX_TREE_DEPTH:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    try:
+        children = sorted(
+            directory.iterdir(),
+            key=lambda item: (not item.is_dir(), item.name.lower()),
+        )
+    except OSError:
+        return entries
+
+    for child in children:
+        if counter[0] >= MAX_TREE_ENTRIES:
+            break
+        if child.name in EXCLUDED_FILES or child.is_symlink():
+            continue
+
+        try:
+            is_dir = child.is_dir()
+        except OSError:
+            continue
+
+        if is_dir and child.name in EXCLUDED_DIRS:
+            continue
+
+        counter[0] += 1
+        item: dict[str, Any] = {
+            "name": child.name,
+            "path": _relative_display_path(child),
+            "type": "directory" if is_dir else "file",
+        }
+        if is_dir:
+            item["children"] = _build_tree(child, depth + 1, counter)
+        else:
+            try:
+                item["size"] = child.stat().st_size
+            except OSError:
+                item["size"] = None
+        entries.append(item)
+
+    return entries
+
+
 async def _send_events(
     websocket: WebSocket,
     queue: asyncio.Queue[dict[str, Any]],
@@ -185,6 +292,56 @@ def _interrupt_session(session: SessionState) -> bool:
         )
     )
     return True
+
+
+@app.get("/api/workspace")
+async def workspace_info() -> dict[str, Any]:
+    return {
+        "root": str(WORKSPACE_ROOT),
+        "name": WORKSPACE_ROOT.name,
+    }
+
+
+@app.get("/api/workspace/tree")
+async def workspace_tree() -> dict[str, Any]:
+    if not WORKSPACE_ROOT.exists() or not WORKSPACE_ROOT.is_dir():
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return {
+        "root": str(WORKSPACE_ROOT),
+        "entries": _build_tree(WORKSPACE_ROOT, 0, [0]),
+        "limit": MAX_TREE_ENTRIES,
+    }
+
+
+@app.get("/api/workspace/file")
+async def workspace_file(path: str) -> dict[str, Any]:
+    target = _workspace_path(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="path is not a file")
+
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="unable to stat file") from exc
+    if size > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="file is too large to preview")
+
+    try:
+        raw = target.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="unable to read file") from exc
+    if b"\x00" in raw[:4096]:
+        raise HTTPException(status_code=415, detail="binary files are not previewable")
+
+    return {
+        "path": _relative_display_path(target),
+        "name": target.name,
+        "language": _language_for_path(target),
+        "size": size,
+        "content": raw.decode("utf-8", errors="replace"),
+    }
 
 
 @app.get("/health")
