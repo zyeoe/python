@@ -2,7 +2,7 @@
 
 基于大模型的桌面端智能体项目骨架。应用使用 Python 后端与 HTML/JS 前端，通过 PyInstaller 打包为桌面应用。
 
-> 当前状态：已实现四种基础工具与可运行的 ReAct 终端循环；桌面 UI、FastAPI/WebSocket 尚未接入。
+> 当前状态：已实现 pywebview 桌面入口、FastAPI/WebSocket 后端、三栏桌面 UI、ReAct 循环与四种基础工具。
 
 ## 架构说明
 
@@ -164,13 +164,53 @@ curl -X POST http://127.0.0.1:8000/api/sessions/{session_id}/interrupt
 
 ## 打包
 
-```bash
-pyinstaller packaging/desktop-agent.spec
+打包前先创建 `.env`，或者打包完成后把 `.env` 放在 exe 同目录：
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env，填入 OPENAI_API_KEY 和模型配置
 ```
 
+安装依赖后，在项目根目录执行：
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+### 单文件 exe
+
+```powershell
+$env:BUILD_MODE = "onefile"
+python -m PyInstaller --clean --noconfirm packaging\desktop-agent.spec
+Remove-Item Env:BUILD_MODE
+```
+
+输出：`dist\desktop-agent.exe`。
+
+### 文件夹版本
+
+```powershell
+$env:BUILD_MODE = "onedir"
+python -m PyInstaller --clean --noconfirm packaging\desktop-agent.spec
+Remove-Item Env:BUILD_MODE
+```
+
+输出：`dist\desktop-agent\desktop-agent.exe`。
+
+打包配置已经设置 `console=False`，双击 exe 会直接显示 pywebview 窗口，不会弹出控制台黑框。应用会在 `127.0.0.1` 上自动选择空闲端口启动 FastAPI，因此不会与常见的 8000 端口冲突。
+
+配置读取顺序：
+
+1. 操作系统环境变量
+2. exe 同目录的 `.env`
+3. 打包进程序的 `.env`
+
+单文件版本可以把 `.env` 一起打进 exe；如果需要后续修改 API Key，建议把 `.env` 放在 exe 同目录，它会覆盖内置配置。注意单文件 exe 中的密钥可以被解包读取，不适合作为高安全性的密钥存储方案。
+
+如果启动失败，程序会在 exe 同目录写入 `desktop-agent-error.log` 并弹出错误提示。
 ## 后续开发
 
-- [ ] 实现 pywebview 桌面入口
+- [x] 实现 pywebview 桌面入口
 - [x] 实现 FastAPI 与 WebSocket 服务
 - [x] 实现 Agent 主循环
 - [ ] 实现工具注册与权限确认
