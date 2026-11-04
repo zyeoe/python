@@ -4,7 +4,7 @@ from __future__ import annotations
 # Agent tools
 # =============================================================================
 # This module contains four small, model-friendly tools:
-#   read  - paginated, line-numbered UTF-8 text reading
+#   read  - paginated text reading plus PNG/JPEG/GIF/WebP image loading
 #   write - atomic UTF-8 file writing
 #   edit  - exact and unique string replacement
 #   bash  - bounded shell command execution
@@ -13,6 +13,7 @@ from __future__ import annotations
 # so the agent loop can pass them directly to the model.
 # =============================================================================
 
+import base64
 import json
 import locale
 import os
@@ -27,6 +28,7 @@ from typing import Any, Callable
 DEFAULT_READ_LIMIT = 200
 MAX_READ_LIMIT = 1_000
 MAX_LINE_CHARS = 4_000
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 # Keep shell commands bounded as well. The model can request a larger timeout,
 # but it cannot exceed MAX_BASH_TIMEOUT.
@@ -65,8 +67,36 @@ def _read_text_exact(path: Path) -> str:
         return f.read()
 
 
-def read(path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT) -> str:
-    """Read a text file line by line and return numbered lines.
+def _detect_image_mime(path: Path) -> str | None:
+    """Detect image formats supported by OpenAI vision inputs."""
+
+    try:
+        with path.open("rb") as f:
+            header = f.read(16)
+    except OSError:
+        return None
+
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def read(
+    path: str,
+    offset: int = 0,
+    limit: int = DEFAULT_READ_LIMIT,
+) -> str | dict[str, Any]:
+    """Read a text file, or load a supported image for multimodal input.
+
+    Text files are returned as paginated, line-numbered UTF-8. PNG, JPEG, GIF
+    and WebP images are returned as a data URL so the agent loop can attach
+    them to the model as an image content part.
 
     Args:
         path: File path, relative to cwd or absolute.
@@ -96,6 +126,22 @@ def read(path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT) -> str:
     if limit <= 0:
         raise ToolError("limit must be > 0")
     limit = min(limit, MAX_READ_LIMIT)
+
+    mime_type = _detect_image_mime(p)
+    if mime_type is not None:
+        size = p.stat().st_size
+        if size > MAX_IMAGE_BYTES:
+            raise ToolError(
+                f"image is too large: {size} bytes; maximum is {MAX_IMAGE_BYTES}"
+            )
+        payload = base64.b64encode(p.read_bytes()).decode("ascii")
+        return {
+            "kind": "image",
+            "path": str(p),
+            "mime_type": mime_type,
+            "size_bytes": size,
+            "data_url": f"data:{mime_type};base64,{payload}",
+        }
 
     selected: list[tuple[int, str]] = []
     total_lines = 0
@@ -363,9 +409,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "read",
         "description": (
-            "Read a UTF-8 text file with line numbers. Use offset and limit to "
-            "page through large files. offset is zero-based. Always inspect "
-            "files before editing them."
+            "Read a UTF-8 text file with line numbers, or load a PNG/JPEG/GIF/"
+            "WebP image for visual inspection. Text reads support offset and "
+            "limit pagination. offset is zero-based. Always inspect files "
+            "before editing them."
         ),
         "parameters": {
             "type": "object",
@@ -489,6 +536,7 @@ def result_to_text(result: Any) -> str:
 
 __all__ = [
     "ToolError",
+    "MAX_IMAGE_BYTES",
     "read",
     "write",
     "edit",

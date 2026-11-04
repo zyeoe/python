@@ -61,6 +61,7 @@ actions taken and the final result.
 
 
 DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 MAX_TOOL_MESSAGE_CHARS = 60_000
 
 
@@ -271,6 +272,50 @@ def _clip_tool_message(text: str) -> str:
     )
 
 
+def _summarize_tool_result(result: Any) -> Any:
+    """Remove inline image payloads from UI traces and text-only tool messages."""
+
+    if isinstance(result, dict) and result.get("kind") == "image":
+        return {
+            key: value
+            for key, value in result.items()
+            if key != "data_url"
+        }
+    return result
+
+
+def _image_user_message(result: Any) -> dict[str, Any] | None:
+    """Create a multimodal user message for an image returned by read()."""
+
+    if not isinstance(result, dict) or result.get("kind") != "image":
+        return None
+
+    data_url = result.get("data_url")
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+        return None
+
+    path = str(result.get("path", "image"))
+    mime_type = str(result.get("mime_type", "image"))
+    size_bytes = int(result.get("size_bytes", 0))
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"The read tool loaded image: {path} "
+                    f"({mime_type}, {size_bytes} bytes). "
+                    "Inspect the attached image when answering."
+                ),
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": data_url},
+            },
+        ],
+    }
+
+
 class ReActAgent:
     """A minimal multi-step ReAct agent using Chat Completions tools.
 
@@ -298,10 +343,32 @@ class ReActAgent:
         if max_steps < 1:
             raise ValueError("max_steps must be >= 1")
 
+        backend = os.getenv("AGENT_MODEL_BACKEND", "auto").strip().lower()
+        if backend not in {"auto", "openai", "mock"}:
+            raise ValueError(
+                "AGENT_MODEL_BACKEND must be 'auto', 'openai', or 'mock'"
+            )
+        if backend == "auto":
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            base_url = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+            has_custom_base_url = bool(
+                base_url and base_url != DEFAULT_OPENAI_BASE_URL
+            )
+            backend = "openai" if api_key or has_custom_base_url else "mock"
+
         self.max_steps = max_steps
-        self.model = model or os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+        self.model = model or (
+            "mock" if backend == "mock" else os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+        )
         self.verbose = verbose
-        self.client = client if client is not None else _create_openai_client()
+        if client is not None:
+            self.client = client
+        elif backend == "mock":
+            from agent.mock_client import StableMockClient
+
+            self.client = StableMockClient()
+        else:
+            self.client = _create_openai_client()
 
         # The full conversation context lives here. Do not replace this with a
         # single prompt string: tool calls and tool results must remain in order
@@ -402,6 +469,7 @@ class ReActAgent:
                 )
                 return answer
 
+            pending_image_messages: list[dict[str, Any]] = []
             for call in tool_calls:
                 _check_cancelled(cancel_event)
                 call_id = str(call.get("id", ""))
@@ -417,6 +485,7 @@ class ReActAgent:
 
                 arguments: dict[str, Any] = {}
                 snapshot = None
+                diff_text = None
                 try:
                     parsed_arguments = json.loads(raw_arguments or "{}")
                     if not isinstance(parsed_arguments, dict):
@@ -448,19 +517,27 @@ class ReActAgent:
                                 "error": f"{type(exc).__name__}: {exc}",
                             }
 
+                tool_result_summary = _summarize_tool_result(tool_result)
+                image_message = _image_user_message(tool_result)
+                if image_message is not None:
+                    pending_image_messages.append(image_message)
+
+                diff_text = _build_file_diff(snapshot)
                 self.trace.append(
                     {
                         "step": step,
                         "call_id": call_id,
                         "tool": name,
                         "arguments": arguments,
-                        "result": tool_result,
-                        "diff": diff_text if "diff_text" in locals() else None,
+                        "result": tool_result_summary,
+                        "diff": diff_text,
                     }
                 )
 
-                is_error = isinstance(tool_result, dict) and "error" in tool_result
-                diff_text = _build_file_diff(snapshot)
+                is_error = (
+                    isinstance(tool_result_summary, dict)
+                    and "error" in tool_result_summary
+                )
                 _emit_event(
                     on_event,
                     "tool_result",
@@ -469,13 +546,15 @@ class ReActAgent:
                     call_id=call_id,
                     tool=name,
                     arguments=arguments,
-                    result=tool_result,
+                    result=tool_result_summary,
                     is_error=is_error,
                     diff=diff_text,
                 )
                 _check_cancelled(cancel_event)
 
-                tool_content = _clip_tool_message(result_to_text(tool_result))
+                tool_content = _clip_tool_message(
+                    result_to_text(tool_result_summary)
+                )
                 self.messages.append(
                     {
                         "role": "tool",
@@ -488,6 +567,11 @@ class ReActAgent:
                 if self.verbose:
                     preview = tool_content.replace("\n", " ")[:240]
                     print(f"[tool result] {preview}", file=sys.stderr)
+
+            # Tool messages must immediately follow the assistant tool-call
+            # message. Attach image content only after every tool result for the
+            # current model turn has been appended.
+            self.messages.extend(pending_image_messages)
 
         # Defensive fallback. The final iteration normally returns above because
         # tools are omitted on the last turn.

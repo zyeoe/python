@@ -2,7 +2,7 @@
 
 基于大模型的桌面端智能体项目骨架。应用使用 Python 后端与 HTML/JS 前端，通过 PyInstaller 打包为桌面应用。
 
-> 当前状态：已实现 pywebview 桌面入口、FastAPI/WebSocket 后端、三栏桌面 UI、ReAct 循环与四种基础工具。
+> 当前状态：已实现 pywebview 桌面入口、FastAPI/WebSocket 后端、三栏桌面 UI、ReAct 循环与四种基础工具；`read` 支持文本分页和常见图片，另提供不依赖网络的稳定 mock 与离线自检。
 
 ## 架构说明
 
@@ -24,6 +24,8 @@ python/
 │  ├─ __init__.py
 │  ├─ core.py
 │  ├─ loop.py
+│  ├─ mock_client.py
+│  ├─ selftest.py
 │  └─ tools.py
 ├─ server/
 │  ├─ __init__.py
@@ -50,11 +52,12 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-复制 `.env.example` 为 `.env`，然后填写模型服务的 API Key。
+复制 `.env.example` 为 `.env`，然后填写模型服务的 API Key。未配置远端模型时，`AGENT_MODEL_BACKEND=auto` 会自动使用稳定 mock，因此界面和工具链仍可离线测试。
 
 ## 配置
 
 - `.env`：运行环境变量
+- `AGENT_MODEL_BACKEND`：`auto`、`openai` 或 `mock`
 - `mcp.json`：MCP Server 列表
 - `packaging/desktop-agent.spec`：PyInstaller 打包配置
 
@@ -66,6 +69,7 @@ pip install -r requirements.txt
 OPENAI_API_KEY=your-key
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=your-model-name
+AGENT_MODEL_BACKEND=auto
 ```
 
 在项目根目录运行：
@@ -78,12 +82,39 @@ python -m agent.core --workspace .
 
 当前工具：
 
-- `read(path, offset, limit)`：分页、带行号读取文本
+- `read(path, offset, limit)`：分页、带行号读取文本；PNG/JPEG/GIF/WebP 会作为多模态图片交给模型
 - `write(path, content)`：自动创建目录并原子写入
 - `edit(path, old, new)`：只允许精确且唯一的字符串替换
 - `bash(command, timeout)`：带硬超时执行命令
 
 JSON Schema 位于 `agent/tools.py` 的 `TOOL_SCHEMAS`，OpenAI tools 包装位于 `OPENAI_TOOLS`。
+
+### 离线 mock 模式
+
+没有配置 API Key 时，`AGENT_MODEL_BACKEND=auto` 会自动回退到稳定 mock，不需要网络即可启动：
+
+```bash
+python -m agent.core --workspace .
+```
+
+也可以显式指定：
+
+```powershell
+$env:AGENT_MODEL_BACKEND = "mock"
+python -m agent.core --workspace .
+Remove-Item Env:AGENT_MODEL_BACKEND
+```
+
+## 基线自检
+
+运行不联网的基线自检：
+
+```powershell
+python -m agent.selftest --out selftest_report.json
+```
+
+自检覆盖 `write` 自动建目录、文本分页、图片读取、`edit` 唯一替换、`bash` 执行、图片进入模型、UI 工具事件和打包配置。命令成功时退出码为 0，并输出机器可读 JSON。
+
 ## 前端界面
 
 `ui/` 使用原生 HTML/CSS/JS 实现三栏桌面界面：

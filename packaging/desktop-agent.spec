@@ -57,6 +57,7 @@ add_package("mcp")
 hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("websockets")
 hiddenimports += [
+    "agent.mock_client",
     "anyio._backends._asyncio",
     "uvicorn.protocols.http.h11_impl",
     "uvicorn.protocols.websockets.websockets_impl",
