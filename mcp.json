@@ -1,3 +1,10 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "issues": {
+      "command": "$PYTHON",
+      "args": ["-m", "mcp_servers.issue_server"],
+      "cwd": ".",
+      "env": {}
+    }
+  }
 }

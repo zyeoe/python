@@ -2,7 +2,7 @@
 
 基于大模型的桌面端智能体项目骨架。应用使用 Python 后端与 HTML/JS 前端，通过 PyInstaller 打包为桌面应用。
 
-> 当前状态：已实现 pywebview 桌面入口、FastAPI/WebSocket 后端、三栏桌面 UI、ReAct 循环与四种基础工具；`read` 支持文本分页和常见图片，另提供不依赖网络的稳定 mock 与离线自检。
+> 当前状态：已实现 pywebview 桌面入口、FastAPI/WebSocket 后端、三栏桌面 UI、ReAct 循环与四种基础工具；`read` 支持文本分页和常见图片，并提供不依赖网络的稳定 mock、渐进披露技能系统、MCP stdio 工具与离线自检。
 
 ## 架构说明
 
@@ -10,8 +10,9 @@
 - 后端：FastAPI 内部 sidecar
 - 实时通信：WebSocket
 - 智能体循环与工具：`agent/`
+- 技能系统：`skills/`，启动时只加载名称和 description
+- MCP 工具：`mcp_servers/` 与 `mcp.json`
 - 前端界面：`ui/`
-- 外部工具扩展：MCP，通过 `mcp.json` 配置
 
 FastAPI 仅绑定 `127.0.0.1`，由桌面应用内部启动；产品形态是桌面窗口，而不是 localhost 网页。
 
@@ -24,9 +25,21 @@ python/
 │  ├─ __init__.py
 │  ├─ core.py
 │  ├─ loop.py
+│  ├─ mcp_client.py
 │  ├─ mock_client.py
 │  ├─ selftest.py
+│  ├─ skills.py
 │  └─ tools.py
+├─ app/
+│  ├─ __init__.py
+│  ├─ inspect.py
+│  └─ selftest.py
+├─ skills/
+│  ├─ run-tests/SKILL.md
+│  ├─ review-diff/SKILL.md
+│  └─ fetch-issue/SKILL.md
+├─ mcp_servers/
+│  └─ issue_server.py
 ├─ server/
 │  ├─ __init__.py
 │  ├─ app.py
@@ -58,6 +71,9 @@ pip install -r requirements.txt
 
 - `.env`：运行环境变量
 - `AGENT_MODEL_BACKEND`：`auto`、`openai` 或 `mock`
+- `ENABLE_SKILLS`：`1` 启用技能系统，`0` 回退到 v1.0 行为
+- `SKILLS_DIR`：技能目录，默认 `./skills`
+- `ENABLE_MCP`：`1` 启用 MCP 工具，`0` 禁用
 - `mcp.json`：MCP Server 列表
 - `packaging/desktop-agent.spec`：PyInstaller 打包配置
 
@@ -113,7 +129,56 @@ Remove-Item Env:AGENT_MODEL_BACKEND
 python -m agent.selftest --out selftest_report.json
 ```
 
-自检覆盖 `write` 自动建目录、文本分页、图片读取、`edit` 唯一替换、`bash` 执行、图片进入模型、UI 工具事件和打包配置。命令成功时退出码为 0，并输出机器可读 JSON。
+自检覆盖 `write` 自动建目录、文本分页、图片读取、`edit` 唯一替换、`bash` 执行、图片进入模型、渐进披露、`use_skill`、技能开关、MCP 工具、UI 工具事件和打包配置。命令成功时退出码为 0，并输出机器可读 JSON。
+
+## 技能系统
+
+三个技能分别覆盖三种形态：
+
+- `run-tests`：纯提示词流程
+- `review-diff`：提示词 + `scripts/collect_diff.py`
+- `fetch-issue`：提示词 + MCP 工具 `mcp__issues__fetch_issue`
+
+启动时 system prompt 只包含技能名称和 description。模型判断需要后调用 `use_skill(name)`，此时才加载完整正文。关闭技能系统：
+
+```powershell
+$env:ENABLE_SKILLS = "0"
+python -m agent.core --workspace .
+Remove-Item Env:ENABLE_SKILLS
+```
+
+生成技能验收 JSON：
+
+```powershell
+python -m app.inspect skills --out skill_report.json
+```
+
+报告由程序扫描技能目录、计算 token、执行 8 条触发试验并统计误触发，不使用手写数字。
+
+### MCP 配置
+
+默认 `mcp.json` 启动本地 stdio MCP 服务：
+
+```json
+{
+  "mcpServers": {
+    "issues": {
+      "command": "$PYTHON",
+      "args": ["-m", "mcp_servers.issue_server"],
+      "cwd": ".",
+      "env": {}
+    }
+  }
+}
+```
+
+`fetch-issue` 技能会调用该服务暴露的 `fetch_issue`。MCP 服务不可用时，技能会明确报告错误，不会伪造 issue 内容。
+
+源码运行时 `$PYTHON` 自动使用当前解释器。打包后的程序如果无法自动找到 Python，可在 `.env` 中指定：
+
+```dotenv
+MCP_PYTHON=C:\Path\To\python.exe
+```
 
 ## 前端界面
 
@@ -244,5 +309,6 @@ Remove-Item Env:BUILD_MODE
 - [x] 实现 pywebview 桌面入口
 - [x] 实现 FastAPI 与 WebSocket 服务
 - [x] 实现 Agent 主循环
+- [x] 实现渐进披露技能系统
+- [x] 接入 MCP Client
 - [ ] 实现工具注册与权限确认
-- [ ] 接入 MCP Client

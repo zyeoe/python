@@ -32,6 +32,8 @@ from typing import Any, Callable
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent.mcp_client import MCPClientManager
+from agent.skills import SkillManager
 from agent.tools import OPENAI_TOOLS, TOOL_FUNCTIONS, result_to_text
 
 
@@ -108,6 +110,10 @@ def _emit_event(
 
 
 def _describe_tool_call(name: str, arguments: dict[str, Any]) -> str:
+    if name == "use_skill":
+        return f"加载技能：{arguments.get('name', '?')}"
+    if name.startswith("mcp__"):
+        return f"调用 MCP 工具：{name}"
     if name == "read":
         return f"读取文件：{arguments.get('path', '?')}"
     if name == "write":
@@ -335,6 +341,8 @@ class ReActAgent:
         client: Any | None = None,
         model: str | None = None,
         verbose: bool = True,
+        skills: SkillManager | None = None,
+        mcp: MCPClientManager | None = None,
     ) -> None:
         try:
             max_steps = int(max_steps)
@@ -370,19 +378,61 @@ class ReActAgent:
         else:
             self.client = _create_openai_client()
 
+        self.skills = skills if skills is not None else SkillManager()
+        self.mcp = mcp if mcp is not None else MCPClientManager()
+        self.tools: list[dict[str, Any]] = list(OPENAI_TOOLS)
+        self.tool_functions: dict[str, Callable[..., Any]] = dict(TOOL_FUNCTIONS)
+        self._mcp_loaded = False
+
+        self.system_prompt = SYSTEM_PROMPT
+        catalog = self.skills.catalog_prompt()
+        if catalog:
+            self.system_prompt += (
+                "\n\n" + catalog + "\n"
+                "The catalog is not the skill body. Call use_skill only when needed."
+            )
+            self.tools.append(self.skills.use_skill_tool())
+            self.tool_functions["use_skill"] = self._use_skill
+
         # The full conversation context lives here. Do not replace this with a
         # single prompt string: tool calls and tool results must remain in order
         # for subsequent model requests to be valid.
         self.messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
+            {"role": "system", "content": self.system_prompt}
         ]
         self.trace: list[dict[str, Any]] = []
 
     def reset(self) -> None:
         """Clear conversation history while keeping configuration."""
 
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [{"role": "system", "content": self.system_prompt}]
         self.trace = []
+
+    def _use_skill(self, name: str) -> str:
+        skill = self.skills.load(name)
+        return (
+            f"Skill: {skill.entry.name}\n"
+            f"Directory: {skill.entry.directory}\n\n"
+            f"{skill.body}"
+        )
+
+    def _ensure_mcp_tools(self) -> None:
+        if self._mcp_loaded:
+            return
+        self._mcp_loaded = True
+        for definition in self.mcp.load_tools():
+            if definition.openai_name in self.tool_functions:
+                continue
+            self.tools.append(definition.openai_tool())
+
+            def call_mcp(
+                *,
+                tool_name: str = definition.openai_name,
+                **arguments: Any,
+            ) -> Any:
+                return self.mcp.call_tool(tool_name, arguments)
+
+            self.tool_functions[definition.openai_name] = call_mcp
 
     def run(
         self,
@@ -403,6 +453,7 @@ class ReActAgent:
         if not isinstance(user_input, str) or not user_input.strip():
             raise ValueError("user_input must be a non-empty string")
 
+        self._ensure_mcp_tools()
         self.messages.append({"role": "user", "content": user_input})
         _emit_event(on_event, "thinking", "正在分析请求并规划下一步。", step=0)
 
@@ -422,7 +473,7 @@ class ReActAgent:
                 "messages": self.messages,
             }
             if step < self.max_steps:
-                request["tools"] = OPENAI_TOOLS
+                request["tools"] = self.tools
                 request["tool_choice"] = "auto"
 
             response = self.client.chat.completions.create(**request)
@@ -505,7 +556,7 @@ class ReActAgent:
                         tool=name,
                         arguments=arguments,
                     )
-                    function_impl = TOOL_FUNCTIONS.get(name)
+                    function_impl = self.tool_functions.get(name)
                     if function_impl is None:
                         tool_result = {"error": f"Unknown tool: {name}"}
                     else:

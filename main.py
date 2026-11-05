@@ -54,6 +54,19 @@ if not mcp_config.is_absolute():
     )
 os.environ["MCP_CONFIG_PATH"] = str(mcp_config.resolve())
 
+skills_dir = Path(os.getenv("SKILLS_DIR", "skills")).expanduser()
+if not skills_dir.is_absolute():
+    external_skills = APP_DIR / skills_dir
+    bundled_skills = RESOURCE_DIR / skills_dir
+    skills_dir = (
+        external_skills
+        if external_skills.is_dir()
+        else bundled_skills
+        if bundled_skills.is_dir()
+        else external_skills
+    )
+os.environ["SKILLS_DIR"] = str(skills_dir.resolve())
+
 # Import after loading .env because server.main reads environment at import time.
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from server.main import app  # noqa: E402

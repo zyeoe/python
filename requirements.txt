@@ -14,9 +14,10 @@ httpx
 pydantic
 pydantic-settings
 python-dotenv
+PyYAML>=6,<7
 
 # MCP
-mcp
+mcp>=2,<3
 
 # Packaging
 pyinstaller

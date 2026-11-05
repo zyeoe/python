@@ -40,6 +40,7 @@ def add_package(package_name: str) -> None:
 
 add_data("ui", "ui")
 add_data("assets", "assets")
+add_data("skills", "skills")
 add_data("mcp.json", ".")
 add_data(".env", ".")
 add_data(".env.example", ".")
@@ -58,6 +59,7 @@ hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("websockets")
 hiddenimports += [
     "agent.mock_client",
+    "mcp_servers.issue_server",
     "anyio._backends._asyncio",
     "uvicorn.protocols.http.h11_impl",
     "uvicorn.protocols.websockets.websockets_impl",
