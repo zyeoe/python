@@ -1,0 +1,69 @@
+{
+  "ok": true,
+  "agents_md": {
+    "found": true,
+    "bytes": 3169,
+    "layers": [
+      "global",
+      "project"
+    ],
+    "global_found": true,
+    "project_found": true,
+    "merge_test": {
+      "layers": [
+        "global",
+        "project"
+      ],
+      "order_ok": true
+    }
+  },
+  "denied": [
+    {
+      "tool": "write",
+      "reason": "密钥不入库，用环境变量",
+      "alternative": "把值写入仓库外的 .env 或系统环境变量，不要修改密钥文件。",
+      "path": ".env"
+    },
+    {
+      "tool": "bash",
+      "reason": "rm -rf 可能批量删除无法恢复的文件",
+      "alternative": "用 git clean -nd 先查看会删什么，再只删除确认过的具体路径。",
+      "command": "rm -rf build/"
+    },
+    {
+      "tool": "bash",
+      "reason": "force push 会覆盖远程历史",
+      "alternative": "用 git revert 创建反向提交，再正常 push。",
+      "command": "git push --force origin main"
+    },
+    {
+      "tool": "bash",
+      "reason": "git reset --hard 会丢弃未提交修改",
+      "alternative": "用 git restore --source=<commit> -- <path> 只恢复需要的文件。",
+      "command": "git reset --hard HEAD~1"
+    }
+  ],
+  "autotest": {
+    "runs": 4,
+    "red": 2,
+    "green": 2,
+    "red_to_green": 2,
+    "injected_lines": 3
+  },
+  "reviewer": {
+    "runs": 2,
+    "issues_found": 3,
+    "main_context_delta": 34,
+    "subagent_tokens": 332
+  },
+  "checks": {
+    "agents_md_found": true,
+    "agents_md_size": true,
+    "agents_merge_order": true,
+    "denied_count": true,
+    "denied_reasons": true,
+    "autotest_red_to_green": true,
+    "reviewer_context": true,
+    "hooks_switch": true
+  }
+}

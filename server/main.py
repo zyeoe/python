@@ -43,7 +43,7 @@ logging.basicConfig(
 
 app = FastAPI(
     title="Desktop Agent Backend",
-    version="1.1.0",
+    version="1.2.0",
     description="Internal FastAPI/WebSocket sidecar for the desktop agent.",
 )
 

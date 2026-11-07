@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
+from agent.customization import load_agents_instructions
+from agent.hooks import HookManager
+from agent.mock_client import ScriptedMockClient, final_turn
+from agent.reviewer import ReviewerAgent
 from agent.skills import SkillManager
 
 TRIALS = [
@@ -79,15 +86,169 @@ def build_skill_report() -> dict[str, Any]:
     }
 
 
+def _build_agents_report(project_root: Path) -> dict[str, Any]:
+    actual = load_agents_instructions(project_root)
+    with tempfile.TemporaryDirectory(prefix="agents-md-test-") as temp_dir:
+        root = Path(temp_dir)
+        global_file = root / "home" / "AGENTS.md"
+        project_file = root / "project" / "AGENTS.md"
+        global_file.parent.mkdir(parents=True)
+        project_file.parent.mkdir(parents=True)
+        global_file.write_text("# Global rule\nglobal-only\n", encoding="utf-8")
+        project_file.write_text("# Project rule\nproject-only\n", encoding="utf-8")
+        merged = load_agents_instructions(
+            project_file.parent,
+            global_path=global_file,
+            enabled=True,
+        )
+        order_ok = (
+            merged.prompt.find("global-only") >= 0
+            and merged.prompt.find("global-only") < merged.prompt.find("project-only")
+        )
+    return {
+        "found": actual.found,
+        "bytes": actual.total_bytes,
+        "layers": actual.layers,
+        "global_found": "global" in actual.layers,
+        "project_found": "project" in actual.layers,
+        "merge_test": {
+            "layers": merged.layers,
+            "order_ok": order_ok,
+        },
+    }
+
+
+def _build_denied_report(project_root: Path) -> list[dict[str, str]]:
+    manager = HookManager(enabled=True, workspace=project_root)
+    manager.before_tool("write", {"path": ".env", "content": "SECRET=x"})
+    manager.before_tool("bash", {"command": "rm -rf build/"})
+    manager.before_tool("bash", {"command": "git push --force origin main"})
+    manager.before_tool("bash", {"command": "git reset --hard HEAD~1"})
+    return manager.denials
+
+
+def _build_autotest_report(project_root: Path) -> dict[str, int]:
+    with tempfile.TemporaryDirectory(prefix="hook-autotest-") as temp_dir:
+        root = Path(temp_dir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "__init__.py").write_text("", encoding="utf-8")
+        (tests / "test_calc.py").write_text(
+            "import unittest\n"
+            "from calc import add\n\n"
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_add(self):\n"
+            "        self.assertEqual(add(2, 3), 5)\n",
+            encoding="utf-8",
+        )
+        command = subprocess.list2cmdline(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-q"]
+        )
+        manager = HookManager(
+            enabled=True,
+            workspace=root,
+            test_command=command,
+        )
+        for _ in range(2):
+            (root / "calc.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+            red = manager.after_tool("write", {"path": str(root / "calc.py")}, {})
+            assert red is not None and red["status"] == "red"
+            (root / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+            green = manager.after_tool("write", {"path": str(root / "calc.py")}, {})
+            assert green is not None and green["status"] == "green"
+        return manager.report()
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _build_reviewer_report() -> dict[str, int]:
+    review_text = (
+        "- app.py: debug `print(` remains in the diff.\n"
+        "- tests/: the new branch has no test coverage.\n"
+        "- app.py: `except: pass` hides failures.\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="reviewer-test-") as temp_dir:
+        root = Path(temp_dir)
+        _git(root, "init")
+        _git(root, "config", "user.email", "selftest@example.invalid")
+        _git(root, "config", "user.name", "Selftest")
+        (root / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+        (root / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        _git(root, "add", ".")
+        _git(root, "commit", "-m", "baseline")
+        (root / "app.py").write_text(
+            "def run():\n"
+            "    print('debug')\n"
+            "    try:\n"
+            "        return 1\n"
+            "    except Exception:\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        client = ScriptedMockClient(
+            [final_turn(review_text), final_turn("No blocking issues found.")]
+        )
+        reviewer = ReviewerAgent(workspace=root, model="mock", client=client)
+        reviewer.review()
+        _git(root, "restore", "app.py")
+        reviewer.review()
+        return reviewer.report()
+
+
+def build_custom_report() -> dict[str, Any]:
+    project_root = Path(__file__).resolve().parent.parent
+    agents_md = _build_agents_report(project_root)
+    denied = _build_denied_report(project_root)
+    autotest = _build_autotest_report(project_root)
+    reviewer = _build_reviewer_report()
+    disabled = HookManager(enabled=False, workspace=project_root)
+    hooks_off = disabled.before_tool("bash", {"command": "rm -rf build/"})
+
+    checks = {
+        "agents_md_found": agents_md["found"],
+        "agents_md_size": 0 < agents_md["bytes"] <= 12_000,
+        "agents_merge_order": agents_md["merge_test"]["order_ok"],
+        "denied_count": len(denied) >= 2,
+        "denied_reasons": all(
+            item.get("reason") and item.get("alternative") for item in denied
+        ),
+        "autotest_red_to_green": autotest["red_to_green"] >= 1,
+        "reviewer_context": reviewer["main_context_delta"] <= 500,
+        "hooks_switch": hooks_off.allowed and not disabled.denials,
+    }
+    return {
+        "ok": all(checks.values()),
+        "agents_md": agents_md,
+        "denied": denied,
+        "autotest": autotest,
+        "reviewer": reviewer,
+        "checks": checks,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect incremental assignment outputs")
     subparsers = parser.add_subparsers(dest="command", required=True)
     skill_parser = subparsers.add_parser("skills", help="Generate skill_report.json")
     skill_parser.add_argument("--out", type=Path, help="Report output path")
+    custom_parser = subparsers.add_parser("custom", help="Generate custom_report.json")
+    custom_parser.add_argument("--out", type=Path, help="Report output path")
     args = parser.parse_args(argv)
 
     if args.command == "skills":
         report = build_skill_report()
+    elif args.command == "custom":
+        report = build_custom_report()
     else:  # pragma: no cover - argparse enforces the available commands
         raise ValueError(f"unknown command: {args.command}")
 

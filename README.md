@@ -2,7 +2,7 @@
 
 基于大模型的桌面端智能体项目骨架。应用使用 Python 后端与 HTML/JS 前端，通过 PyInstaller 打包为桌面应用。
 
-> 当前状态：已实现 pywebview 桌面入口、FastAPI/WebSocket 后端、三栏桌面 UI、ReAct 循环与四种基础工具；`read` 支持文本分页和常见图片，并提供不依赖网络的稳定 mock、渐进披露技能系统、MCP stdio 工具与离线自检。
+> 当前状态：已实现 pywebview 桌面入口、FastAPI/WebSocket 后端、三栏桌面 UI、ReAct 循环与四种基础工具；`read` 支持文本分页和常见图片，并提供稳定 mock、渐进披露技能系统、MCP 工具、AGENTS.md 注入、代码级 hooks 与隔离 reviewer。
 
 ## 架构说明
 
@@ -12,6 +12,9 @@
 - 智能体循环与工具：`agent/`
 - 技能系统：`skills/`，启动时只加载名称和 description
 - MCP 工具：`mcp_servers/` 与 `mcp.json`
+- 行为文件：`AGENTS.md` 与便携全局层 `AGENTS.global.md`
+- 硬约束：`agent/hooks.py`
+- 子 agent：`agent/reviewer.py`
 - 前端界面：`ui/`
 
 FastAPI 仅绑定 `127.0.0.1`，由桌面应用内部启动；产品形态是桌面窗口，而不是 localhost 网页。
@@ -25,8 +28,11 @@ python/
 │  ├─ __init__.py
 │  ├─ core.py
 │  ├─ loop.py
+│  ├─ customization.py
+│  ├─ hooks.py
 │  ├─ mcp_client.py
 │  ├─ mock_client.py
+│  ├─ reviewer.py
 │  ├─ selftest.py
 │  ├─ skills.py
 │  └─ tools.py
@@ -51,6 +57,11 @@ python/
 │  └─ style.css
 ├─ packaging/
 │  └─ desktop-agent.spec
+├─ tests/
+├─ AGENTS.md
+├─ AGENTS.global.md
+├─ skill_report.json
+├─ custom_report.json
 ├─ mcp.json
 ├─ requirements.txt
 ├─ .env.example
@@ -74,6 +85,10 @@ pip install -r requirements.txt
 - `ENABLE_SKILLS`：`1` 启用技能系统，`0` 回退到 v1.0 行为
 - `SKILLS_DIR`：技能目录，默认 `./skills`
 - `ENABLE_MCP`：`1` 启用 MCP 工具，`0` 禁用
+- `ENABLE_AGENTS`：`1` 注入 AGENTS.md，`0` 禁用
+- `ENABLE_HOOKS`：`1` 启用代码级 hook，`0` 回退到无 hook 行为
+- `ENABLE_REVIEWER`：`1` 暴露隔离 reviewer，`0` 禁用
+- `AGENTS_GLOBAL_PATH`：可选的全局 AGENTS.md 路径
 - `mcp.json`：MCP Server 列表
 - `packaging/desktop-agent.spec`：PyInstaller 打包配置
 
@@ -173,6 +188,43 @@ python -m app.inspect skills --out skill_report.json
 ```
 
 `fetch-issue` 技能会调用该服务暴露的 `fetch_issue`。MCP 服务不可用时，技能会明确报告错误，不会伪造 issue 内容。
+
+## 定制层
+
+### AGENTS.md
+
+启动时按以下顺序拼进 system prompt：
+
+1. 用户目录 `~/AGENTS.md`
+2. 项目最近一层 `AGENTS.md`
+
+如果用户目录没有全局文件，则使用仓库自带的便携层 `AGENTS.global.md`。项目文件始终覆盖在全局文件之后。
+
+### Hooks
+
+- `PreToolUse`：拒绝写 `.env`、`*.pem`、`*.key`，理由固定为“密钥不入库，用环境变量”。
+- `PreToolUse`：拒绝 `rm -rf`、force push、`git reset --hard`，并返回安全替代方案。
+- `PostToolUse`：`write` / `edit` 后自动跑测试，失败时只回注最多 3 行摘要。
+
+关闭 hooks：
+
+```powershell
+$env:ENABLE_HOOKS = "0"
+python -m agent.core --workspace .
+Remove-Item Env:ENABLE_HOOKS
+```
+
+### Reviewer
+
+主 agent 可通过 `review_changes` 工具启动 reviewer。reviewer 使用独立消息上下文，只读取 git diff，不暴露写工具，只把最终审查结果返回主上下文。
+
+生成定制层验收 JSON：
+
+```powershell
+python -m app.inspect custom --out custom_report.json
+```
+
+报告里的拒绝记录、红绿测试和 reviewer token 数据均由程序实际执行生成。
 
 源码运行时 `$PYTHON` 自动使用当前解释器。打包后的程序如果无法自动找到 Python，可在 `.env` 中指定：
 
@@ -311,4 +363,7 @@ Remove-Item Env:BUILD_MODE
 - [x] 实现 Agent 主循环
 - [x] 实现渐进披露技能系统
 - [x] 接入 MCP Client
+- [x] 实现 AGENTS.md 自动注入
+- [x] 实现代码级 hooks
+- [x] 实现隔离 reviewer 子 agent
 - [ ] 实现工具注册与权限确认

@@ -41,6 +41,7 @@ def add_package(package_name: str) -> None:
 add_data("ui", "ui")
 add_data("assets", "assets")
 add_data("skills", "skills")
+add_data("AGENTS.global.md", ".")
 add_data("mcp.json", ".")
 add_data(".env", ".")
 add_data(".env.example", ".")

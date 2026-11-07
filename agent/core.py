@@ -32,7 +32,10 @@ from typing import Any, Callable
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent.customization import AgentsInstructions, load_agents_instructions
+from agent.hooks import HookManager
 from agent.mcp_client import MCPClientManager
+from agent.reviewer import ReviewerAgent, reviewer_enabled
 from agent.skills import SkillManager
 from agent.tools import OPENAI_TOOLS, TOOL_FUNCTIONS, result_to_text
 
@@ -112,6 +115,8 @@ def _emit_event(
 def _describe_tool_call(name: str, arguments: dict[str, Any]) -> str:
     if name == "use_skill":
         return f"加载技能：{arguments.get('name', '?')}"
+    if name == "review_changes":
+        return "启动隔离 reviewer"
     if name.startswith("mcp__"):
         return f"调用 MCP 工具：{name}"
     if name == "read":
@@ -343,6 +348,9 @@ class ReActAgent:
         verbose: bool = True,
         skills: SkillManager | None = None,
         mcp: MCPClientManager | None = None,
+        agents: AgentsInstructions | None = None,
+        hooks: HookManager | None = None,
+        reviewer: ReviewerAgent | None = None,
     ) -> None:
         try:
             max_steps = int(max_steps)
@@ -380,11 +388,16 @@ class ReActAgent:
 
         self.skills = skills if skills is not None else SkillManager()
         self.mcp = mcp if mcp is not None else MCPClientManager()
+        self.agents = agents if agents is not None else load_agents_instructions()
+        self.hooks = hooks if hooks is not None else HookManager()
         self.tools: list[dict[str, Any]] = list(OPENAI_TOOLS)
         self.tool_functions: dict[str, Callable[..., Any]] = dict(TOOL_FUNCTIONS)
         self._mcp_loaded = False
 
         self.system_prompt = SYSTEM_PROMPT
+        if self.agents.prompt:
+            self.system_prompt += "\n\n" + self.agents.prompt
+
         catalog = self.skills.catalog_prompt()
         if catalog:
             self.system_prompt += (
@@ -393,6 +406,25 @@ class ReActAgent:
             )
             self.tools.append(self.skills.use_skill_tool())
             self.tool_functions["use_skill"] = self._use_skill
+
+        self.reviewer: ReviewerAgent | None = None
+        if reviewer_enabled():
+            if reviewer is not None:
+                self.reviewer = reviewer
+            else:
+                if backend == "mock":
+                    from agent.mock_client import StableMockClient
+
+                    reviewer_client = StableMockClient()
+                else:
+                    reviewer_client = _create_openai_client()
+                self.reviewer = ReviewerAgent(
+                    workspace=Path.cwd(),
+                    model=self.model,
+                    client=reviewer_client,
+                )
+            self.tools.append(self.reviewer.review_tool())
+            self.tool_functions["review_changes"] = self._review_changes
 
         # The full conversation context lives here. Do not replace this with a
         # single prompt string: tool calls and tool results must remain in order
@@ -415,6 +447,11 @@ class ReActAgent:
             f"Directory: {skill.entry.directory}\n\n"
             f"{skill.body}"
         )
+
+    def _review_changes(self, base: str | None = None, staged: bool = False) -> str:
+        if self.reviewer is None:
+            raise RuntimeError("reviewer is disabled by ENABLE_REVIEWER=0")
+        return self.reviewer.review(base=base, staged=staged).text
 
     def _ensure_mcp_tools(self) -> None:
         if self._mcp_loaded:
@@ -521,6 +558,7 @@ class ReActAgent:
                 return answer
 
             pending_image_messages: list[dict[str, Any]] = []
+            pending_hook_messages: list[dict[str, Any]] = []
             for call in tool_calls:
                 _check_cancelled(cancel_event)
                 call_id = str(call.get("id", ""))
@@ -537,6 +575,7 @@ class ReActAgent:
                 arguments: dict[str, Any] = {}
                 snapshot = None
                 diff_text = None
+                post_tool = None
                 try:
                     parsed_arguments = json.loads(raw_arguments or "{}")
                     if not isinstance(parsed_arguments, dict):
@@ -560,13 +599,38 @@ class ReActAgent:
                     if function_impl is None:
                         tool_result = {"error": f"Unknown tool: {name}"}
                     else:
-                        snapshot = _snapshot_file_for_diff(name, arguments)
-                        try:
-                            tool_result = function_impl(**arguments)
-                        except Exception as exc:  # Tool errors are model-visible.
+                        hook_decision = self.hooks.before_tool(name, arguments)
+                        if not hook_decision.allowed:
                             tool_result = {
-                                "error": f"{type(exc).__name__}: {exc}",
+                                "error": f"Blocked by PreToolUse hook: {hook_decision.reason}",
+                                "hook": "PreToolUse",
+                                "reason": hook_decision.reason,
+                                "alternative": hook_decision.alternative,
                             }
+                        else:
+                            snapshot = _snapshot_file_for_diff(name, arguments)
+                            try:
+                                tool_result = function_impl(**arguments)
+                            except Exception as exc:  # Tool errors are model-visible.
+                                tool_result = {
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                }
+                            else:
+                                post_tool = self.hooks.after_tool(
+                                    name,
+                                    arguments,
+                                    tool_result,
+                                )
+                                if post_tool and post_tool.get("status") == "red":
+                                    pending_hook_messages.append(
+                                        {
+                                            "role": "user",
+                                            "content": (
+                                                "[PostToolUse]\n"
+                                                + str(post_tool.get("summary", ""))
+                                            ),
+                                        }
+                                    )
 
                 tool_result_summary = _summarize_tool_result(tool_result)
                 image_message = _image_user_message(tool_result)
@@ -582,6 +646,7 @@ class ReActAgent:
                         "arguments": arguments,
                         "result": tool_result_summary,
                         "diff": diff_text,
+                        "post_tool": post_tool,
                     }
                 )
 
@@ -600,6 +665,7 @@ class ReActAgent:
                     result=tool_result_summary,
                     is_error=is_error,
                     diff=diff_text,
+                    post_tool=post_tool,
                 )
                 _check_cancelled(cancel_event)
 
@@ -623,6 +689,7 @@ class ReActAgent:
             # message. Attach image content only after every tool result for the
             # current model turn has been appended.
             self.messages.extend(pending_image_messages)
+            self.messages.extend(pending_hook_messages)
 
         # Defensive fallback. The final iteration normally returns above because
         # tools are omitted on the last turn.

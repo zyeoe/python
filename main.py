@@ -67,6 +67,21 @@ if not skills_dir.is_absolute():
     )
 os.environ["SKILLS_DIR"] = str(skills_dir.resolve())
 
+configured_global_agents = os.getenv("AGENTS_GLOBAL_PATH", "").strip()
+if not configured_global_agents:
+    external_global_agents = APP_DIR / "AGENTS.global.md"
+    bundled_global_agents = RESOURCE_DIR / "AGENTS.global.md"
+    global_agents = (
+        external_global_agents
+        if external_global_agents.is_file()
+        else bundled_global_agents
+        if bundled_global_agents.is_file()
+        else user_global_agents
+        if (user_global_agents := Path.home() / "AGENTS.md").is_file()
+        else APP_DIR / "AGENTS.global.md"
+    )
+    os.environ["AGENTS_GLOBAL_PATH"] = str(global_agents.resolve())
+
 # Import after loading .env because server.main reads environment at import time.
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from server.main import app  # noqa: E402
