@@ -56,6 +56,27 @@
     "main_context_delta": 34,
     "subagent_tokens": 332
   },
+  "switches": {
+    "ENABLE_SKILLS": {
+      "entries": 0,
+      "catalog_empty": true
+    },
+    "ENABLE_HOOKS": {
+      "denial_allowed": true,
+      "denials_recorded": 0
+    },
+    "ENABLE_AGENTS": {
+      "layers": [],
+      "found": false
+    },
+    "ENABLE_REVIEWER": {
+      "enabled": false
+    },
+    "ENABLE_MCP": {
+      "enabled": false,
+      "servers": 0
+    }
+  },
   "checks": {
     "agents_md_found": true,
     "agents_md_size": true,
@@ -64,6 +85,11 @@
     "denied_reasons": true,
     "autotest_red_to_green": true,
     "reviewer_context": true,
-    "hooks_switch": true
+    "hooks_switch": true,
+    "skills_switch": true,
+    "agents_switch": true,
+    "reviewer_switch": true,
+    "mcp_switch": true,
+    "switches_ok": true
   }
 }

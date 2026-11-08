@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from agent.customization import load_agents_instructions
 from agent.hooks import HookManager
+from agent.mcp_client import MCPClientManager
 from agent.mock_client import ScriptedMockClient, final_turn
-from agent.reviewer import ReviewerAgent
+from agent.reviewer import ReviewerAgent, reviewer_enabled
 from agent.skills import SkillManager
+
+T = TypeVar("T")
 
 TRIALS = [
     {"query": "帮我跑一下测试", "expected": "run-tests"},
@@ -205,12 +209,66 @@ def _build_reviewer_report() -> dict[str, int]:
         return reviewer.report()
 
 
+def _with_env(name: str, value: str, callback: Callable[[], T]) -> T:
+    previous = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        return callback()
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
+
+def _build_switches_report(project_root: Path) -> dict[str, Any]:
+    skills_off = _with_env("ENABLE_SKILLS", "0", SkillManager)
+    hooks_off = _with_env(
+        "ENABLE_HOOKS",
+        "0",
+        lambda: HookManager(enabled=None, workspace=project_root),
+    )
+    agents_off = _with_env(
+        "ENABLE_AGENTS",
+        "0",
+        lambda: load_agents_instructions(project_root),
+    )
+    reviewer_off = _with_env("ENABLE_REVIEWER", "0", reviewer_enabled)
+    mcp_off = _with_env(
+        "ENABLE_MCP",
+        "0",
+        lambda: MCPClientManager(project_root / "mcp.json"),
+    )
+    return {
+        "ENABLE_SKILLS": {
+            "entries": len(skills_off.entries),
+            "catalog_empty": not bool(skills_off.catalog_prompt()),
+        },
+        "ENABLE_HOOKS": {
+            "denial_allowed": hooks_off.before_tool(
+                "bash", {"command": "rm -rf build/"}
+            ).allowed,
+            "denials_recorded": len(hooks_off.denials),
+        },
+        "ENABLE_AGENTS": {
+            "layers": agents_off.layers,
+            "found": agents_off.found,
+        },
+        "ENABLE_REVIEWER": {"enabled": reviewer_off},
+        "ENABLE_MCP": {
+            "enabled": mcp_off.enabled,
+            "servers": len(mcp_off.servers),
+        },
+    }
+
+
 def build_custom_report() -> dict[str, Any]:
     project_root = Path(__file__).resolve().parent.parent
     agents_md = _build_agents_report(project_root)
     denied = _build_denied_report(project_root)
     autotest = _build_autotest_report(project_root)
     reviewer = _build_reviewer_report()
+    switches = _build_switches_report(project_root)
     disabled = HookManager(enabled=False, workspace=project_root)
     hooks_off = disabled.before_tool("bash", {"command": "rm -rf build/"})
 
@@ -225,6 +283,20 @@ def build_custom_report() -> dict[str, Any]:
         "autotest_red_to_green": autotest["red_to_green"] >= 1,
         "reviewer_context": reviewer["main_context_delta"] <= 500,
         "hooks_switch": hooks_off.allowed and not disabled.denials,
+        "skills_switch": (
+            switches["ENABLE_SKILLS"]["entries"] == 0
+            and switches["ENABLE_SKILLS"]["catalog_empty"]
+        ),
+        "agents_switch": not switches["ENABLE_AGENTS"]["found"],
+        "reviewer_switch": not switches["ENABLE_REVIEWER"]["enabled"],
+        "mcp_switch": (
+            not switches["ENABLE_MCP"]["enabled"]
+            and switches["ENABLE_MCP"]["servers"] == 0
+        ),
+        "switches_ok": (
+            switches["ENABLE_HOOKS"]["denial_allowed"]
+            and switches["ENABLE_HOOKS"]["denials_recorded"] == 0
+        ),
     }
     return {
         "ok": all(checks.values()),
@@ -232,6 +304,7 @@ def build_custom_report() -> dict[str, Any]:
         "denied": denied,
         "autotest": autotest,
         "reviewer": reviewer,
+        "switches": switches,
         "checks": checks,
     }
 

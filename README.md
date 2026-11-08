@@ -62,6 +62,7 @@ python/
 ├─ AGENTS.global.md
 ├─ skill_report.json
 ├─ custom_report.json
+├─ report.md
 ├─ mcp.json
 ├─ requirements.txt
 ├─ .env.example
